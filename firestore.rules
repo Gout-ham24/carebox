@@ -1,0 +1,88 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isCircleMember(circleId) {
+      return signedIn() && exists(/databases/$(database)/documents/circles/$(circleId)/members/$(request.auth.uid));
+    }
+    function isPrimary(circleId) {
+      return isCircleMember(circleId)
+        && get(/databases/$(database)/documents/circles/$(circleId)/members/$(request.auth.uid)).data.role == 'primaryCaretaker';
+    }
+
+    match /users/{uid} {
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['displayName', 'email', 'createdAt'])
+        && request.resource.data.displayName is string
+        && request.resource.data.email is string;
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'email']);
+      allow delete: if false;
+    }
+
+    match /circles/{circleId} {
+      allow read: if isCircleMember(circleId);
+      allow create, update, delete: if false;
+
+      match /members/{memberId} {
+        allow read: if isCircleMember(circleId);
+        // Membership, role assignment, invitation acceptance and removal are trusted backend operations.
+        allow create, update, delete: if false;
+      }
+
+      match /schedules/{scheduleId} {
+        allow read: if isCircleMember(circleId);
+        allow create: if isPrimary(circleId)
+          && request.resource.data.keys().hasOnly(['name', 'box', 'hour', 'minute', 'days', 'enabled', 'updatedAt'])
+          && request.resource.data.name is string
+          && request.resource.data.box is string
+          && request.resource.data.hour is int && request.resource.data.hour >= 0 && request.resource.data.hour <= 23
+          && request.resource.data.minute is int && request.resource.data.minute >= 0 && request.resource.data.minute <= 59
+          && request.resource.data.days is list
+          && request.resource.data.enabled is bool;
+        allow update: if isPrimary(circleId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'box', 'hour', 'minute', 'days', 'enabled', 'updatedAt'])
+          && request.resource.data.name is string
+          && request.resource.data.days is list
+          && request.resource.data.enabled is bool;
+        allow delete: if isPrimary(circleId);
+      }
+
+      match /doseEvents/{eventId} {
+        allow read: if isCircleMember(circleId);
+        // Device events, missed transitions and audit timestamps are written by authenticated backend only.
+        allow create, update, delete: if false;
+      }
+
+      match /concerns/{concernId} {
+        allow read: if isCircleMember(circleId);
+        allow create: if isCircleMember(circleId)
+          && request.resource.data.keys().hasOnly(['title', 'detail', 'raisedBy', 'status', 'response', 'createdAt'])
+          && request.resource.data.raisedBy == request.auth.uid
+          && request.resource.data.title is string
+          && request.resource.data.detail is string
+          && request.resource.data.status == 'Open'
+          && request.resource.data.response == '';
+        allow update: if isCircleMember(circleId)
+          && request.resource.data.raisedBy == resource.data.raisedBy
+          && request.resource.data.title == resource.data.title
+          && request.resource.data.detail == resource.data.detail
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'response']);
+        allow delete: if false;
+      }
+
+      match /devices/{deviceId} {
+        allow read: if isCircleMember(circleId);
+        // Device telemetry and command acknowledgement must pass through authenticated backend.
+        allow write: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
